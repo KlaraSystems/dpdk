@@ -85,6 +85,8 @@ enum {
 	OPT_TELEMETRY_NUM,
 #define OPT_NO_TELEMETRY      "no-telemetry"
 	OPT_NO_TELEMETRY_NUM,
+#define	OPT_LARGEPAGE_OBJECT  "largepage-object"
+	OPT_LARGEPAGE_OBJECT_NUM,
 	OPT_LONG_MAX_NUM
 };
 

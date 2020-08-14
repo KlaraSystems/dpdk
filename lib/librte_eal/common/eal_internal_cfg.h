@@ -78,6 +78,7 @@ struct internal_config {
 	char *hugepage_dir;         /**< specific hugetlbfs directory to use */
 	char *user_mbuf_pool_ops_name;
 			/**< user defined mbuf pool ops name */
+	char *largepage_object;           /**< name of large page object */
 	unsigned num_hugepage_sizes;      /**< how many sizes on this system */
 	struct hugepage_info hugepage_info[MAX_HUGEPAGE_SIZES];
 	enum rte_iova_mode iova_mode ;    /**< Set IOVA mode on this system  */

@@ -102,6 +102,7 @@ eal_long_options[] = {
 	{OPT_MATCH_ALLOCATIONS, 0, NULL, OPT_MATCH_ALLOCATIONS_NUM},
 	{OPT_TELEMETRY,         0, NULL, OPT_TELEMETRY_NUM        },
 	{OPT_NO_TELEMETRY,      0, NULL, OPT_NO_TELEMETRY_NUM     },
+	{OPT_LARGEPAGE_OBJECT,  1, NULL, OPT_LARGEPAGE_OBJECT_NUM },
 	{0,                     0, NULL, 0                        }
 };
 
@@ -341,6 +342,7 @@ eal_reset_internal_config(struct internal_config *internal_cfg)
 	internal_cfg->create_uio_dev = 0;
 	internal_cfg->iova_mode = RTE_IOVA_DC;
 	internal_cfg->user_mbuf_pool_ops_name = NULL;
+	internal_cfg->largepage_object = NULL;
 	CPU_ZERO(&internal_cfg->ctrl_cpuset);
 	internal_cfg->init_complete = 0;
 }
@@ -1779,6 +1781,8 @@ eal_cleanup_config(struct internal_config *internal_cfg)
 		free(internal_cfg->hugepage_dir);
 	if (internal_cfg->user_mbuf_pool_ops_name != NULL)
 		free(internal_cfg->user_mbuf_pool_ops_name);
+	if (internal_cfg->largepage_object != NULL)
+		free(internal_cfg->largepage_object);
 
 	return 0;
 }
@@ -1844,6 +1848,11 @@ eal_check_common_options(struct internal_config *internal_cfg)
 	if (internal_cfg->user_mbuf_pool_ops_name != NULL &&
 			strlen(internal_cfg->user_mbuf_pool_ops_name) < 1) {
 		RTE_LOG(ERR, EAL, "Invalid length of --" OPT_MBUF_POOL_OPS_NAME" option\n");
+		return -1;
+	}
+	if (internal_cfg->largepage_object != NULL &&
+			strlen(internal_cfg->largepage_object) < 1) {
+		RTE_LOG(ERR, EAL, "Invalid length of --" OPT_LARGEPAGE_OBJECT" option\n");
 		return -1;
 	}
 	if (index(eal_get_hugefile_prefix(), '%') != NULL) {
