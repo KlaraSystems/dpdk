@@ -17,4 +17,6 @@ The following EAL parameters are common to all platforms supported by DPDK.
 FreeBSD-specific EAL parameters
 -------------------------------
 
-There are currently no FreeBSD-specific EAL command-line parameters available.
+*   ``--largepage-object <shared memory object path>``
+
+    Use the specified large page object instead of the default /dpdk/largepage.

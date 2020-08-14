@@ -2,8 +2,10 @@
  * Copyright(c) 2010-2014 Intel Corporation
  */
 #include <sys/types.h>
-#include <sys/sysctl.h>
+#include <sys/filio.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <string.h>
 
 #include <rte_log.h>
@@ -14,7 +16,7 @@
 #include "eal_internal_cfg.h"
 #include "eal_filesystem.h"
 
-#define CONTIGMEM_DEV "/dev/contigmem"
+#define DEFAULT_LARGEPAGE_OBJECT "/dpdk/largepage"
 
 /*
  * Uses mmap to create a shared memory area for storage of data
@@ -48,76 +50,74 @@ create_shared_memory(const char *filename, const size_t mem_size)
 	return map_shared_memory(filename, mem_size, O_RDWR | O_CREAT);
 }
 
-/*
- * No hugepage support on freebsd, but we dummy it, using contigmem driver
- */
 int
 eal_hugepage_info_init(void)
 {
-	size_t sysctl_size;
-	int num_buffers, fd, error;
-	int64_t buffer_size;
-	struct internal_config *internal_conf =
-		eal_get_internal_configuration();
+	char path[PATH_MAX];
+	struct hugepage_info *hpi;
+	struct internal_config *internal_conf = eal_get_internal_configuration();
+	struct shm_largepage_conf lpc;
+	struct stat sb;
+	unsigned i;
+	size_t ps[MAXPAGESIZES];
+	int fd, pscnt;
 
-	/* re-use the linux "internal config" structure for our memory data */
-	struct hugepage_info *hpi = &internal_conf->hugepage_info[0];
-	struct hugepage_info *tmp_hpi;
-	unsigned int i;
-
-	internal_conf->num_hugepage_sizes = 1;
-
-	sysctl_size = sizeof(num_buffers);
-	error = sysctlbyname("hw.contigmem.num_buffers", &num_buffers,
-			&sysctl_size, NULL, 0);
-
-	if (error != 0) {
-		RTE_LOG(ERR, EAL, "could not read sysctl hw.contigmem.num_buffers\n");
+	pscnt = getpagesizes(ps, MAXPAGESIZES);
+	if (pscnt < 0) {
+		RTE_LOG(ERR, EAL, "Could not fetch page sizes array\n");
 		return -1;
 	}
 
-	sysctl_size = sizeof(buffer_size);
-	error = sysctlbyname("hw.contigmem.buffer_size", &buffer_size,
-			&sysctl_size, NULL, 0);
+	/* 2MB or 1GB only. */
+	internal_conf->num_hugepage_sizes = pscnt - 1;
 
-	if (error != 0) {
-		RTE_LOG(ERR, EAL, "could not read sysctl hw.contigmem.buffer_size\n");
-		return -1;
-	}
-
-	fd = open(CONTIGMEM_DEV, O_RDWR);
-	if (fd < 0) {
-		RTE_LOG(ERR, EAL, "could not open "CONTIGMEM_DEV"\n");
-		return -1;
-	}
-
-	if (buffer_size >= 1<<30)
-		RTE_LOG(INFO, EAL, "Contigmem driver has %d buffers, each of size %dGB\n",
-				num_buffers, (int)(buffer_size>>30));
-	else if (buffer_size >= 1<<20)
-		RTE_LOG(INFO, EAL, "Contigmem driver has %d buffers, each of size %dMB\n",
-				num_buffers, (int)(buffer_size>>20));
+	if (internal_conf->largepage_object != NULL)
+		(void)snprintf(path, sizeof(path), "%s",
+		    internal_conf->largepage_object);
 	else
-		RTE_LOG(INFO, EAL, "Contigmem driver has %d buffers, each of size %dKB\n",
-				num_buffers, (int)(buffer_size>>10));
+		(void)snprintf(path, sizeof(path), "%s",
+		    DEFAULT_LARGEPAGE_OBJECT);
 
-	strlcpy(hpi->hugedir, CONTIGMEM_DEV, sizeof(hpi->hugedir));
-	hpi->hugepage_sz = buffer_size;
-	hpi->num_pages[0] = num_buffers;
+	fd = shm_open(path, O_RDWR, 0);
+	if (fd < 0) {
+		RTE_LOG(ERR, EAL, "Failed to open large page object %s: %s\n",
+		    path, strerror(errno));
+		return -1;
+	}
+	if (ioctl(fd, FIOGSHMLPGCNF, &lpc) != 0) {
+		RTE_LOG(ERR, EAL, "Failed to obtain large page info from %s: %s\n",
+		    path, strerror(errno));
+		(void)close(fd);
+		return -1;
+	}
+	if (fstat(fd, &sb) != 0) {
+		RTE_LOG(ERR, EAL, "Failed to stat %s: %s\n", path, strerror(errno));
+		(void)close(fd);
+		return -1;
+	}
+
+	/* Record all pages as being in domain 0 for now, they will be sorted
+	 * later.
+	 */
+	hpi = &internal_conf->hugepage_info[lpc.psind - 1];
+	(void)strlcpy(hpi->hugedir, path, sizeof(hpi->hugedir));
+	hpi->hugepage_sz = ps[lpc.psind];
+	hpi->num_pages[0] = sb.st_size / ps[lpc.psind];
 	hpi->lock_descriptor = fd;
 
 	/* for no shared files mode, do not create shared memory config */
 	if (internal_conf->no_shconf)
 		return 0;
 
-	tmp_hpi = create_shared_memory(eal_hugepage_info_path(),
+	struct hugepage_info *tmp_hpi = create_shared_memory(eal_hugepage_info_path(),
 			sizeof(internal_conf->hugepage_info));
 	if (tmp_hpi == NULL ) {
 		RTE_LOG(ERR, EAL, "Failed to create shared memory!\n");
 		return -1;
 	}
 
-	memcpy(tmp_hpi, hpi, sizeof(internal_conf->hugepage_info));
+	memcpy(tmp_hpi, internal_conf->hugepage_info,
+	       sizeof(internal_conf->hugepage_info));
 
 	/* we've copied file descriptors along with everything else, but they
 	 * will be invalid in secondary process, so overwrite them
@@ -131,7 +131,6 @@ eal_hugepage_info_init(void)
 		RTE_LOG(ERR, EAL, "Failed to unmap shared memory!\n");
 		return -1;
 	}
-
 	return 0;
 }
 
