@@ -85,8 +85,8 @@ fill_largepage(struct largepage *lp, int fd, unsigned int index, uint64_t page_s
 		RTE_LOG(ERR, EAL, "Failed to map largepage object: %s\n", strerror(errno));
 		return -1;
 	}
-	/* Trigger creation of a mapping. */
-	(void)*(volatile char *)addr;
+	/* Zero memory left behind by a previous use of the object. */
+	memset(addr, 0, page_sz);
 
 	memfd = open("/dev/mem", O_RDONLY);
 	if (memfd < 0) {
