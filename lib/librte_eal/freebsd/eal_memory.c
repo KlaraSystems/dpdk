@@ -80,7 +80,7 @@ fill_largepage(struct largepage *lp, int fd, unsigned int index, uint64_t page_s
 	void *addr;
 	int error, memfd;
 
-	addr = mmap(NULL, page_sz, PROT_READ, MAP_SHARED | MAP_NOCORE, fd, index * page_sz);
+	addr = mmap(NULL, page_sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_NOCORE, fd, index * page_sz);
 	if (addr == MAP_FAILED) {
 		RTE_LOG(ERR, EAL, "Failed to map largepage object: %s\n", strerror(errno));
 		return -1;
