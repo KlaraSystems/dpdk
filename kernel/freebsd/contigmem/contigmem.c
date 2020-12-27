@@ -9,9 +9,11 @@ __FBSDID("$FreeBSD$");
 #include <sys/bio.h>
 #include <sys/bus.h>
 #include <sys/conf.h>
+#include <sys/eventhandler.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
+#include <sys/mutex.h>
 #include <sys/proc.h>
 #include <sys/rwlock.h>
 #include <sys/systm.h>
@@ -294,19 +296,13 @@ contigmem_cdev_pager_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 		VM_OBJECT_WLOCK(object);
 		vm_page_updatefake(page, paddr, memattr);
 	} else {
-		vm_page_t mret;
 		/*
 		 * Replace the passed in reqpage page with our own fake page and
 		 * free up the original page.
 		 */
 		page = vm_page_getfake(paddr, memattr);
 		VM_OBJECT_WLOCK(object);
-		mret = vm_page_replace(page, object, (*mres)->pindex);
-		KASSERT(mret == *mres,
-		    ("invalid page replacement, old=%p, ret=%p", *mres, mret));
-		vm_page_lock(mret);
-		vm_page_free(mret);
-		vm_page_unlock(mret);
+		vm_page_replace(page, object, (*mres)->pindex, *mres);
 		*mres = page;
 	}
 
