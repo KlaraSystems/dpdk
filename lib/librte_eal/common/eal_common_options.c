@@ -79,6 +79,7 @@ eal_long_options[] = {
 	{OPT_VMWARE_TSC_MAP,    0, NULL, OPT_VMWARE_TSC_MAP_NUM   },
 	{OPT_LEGACY_MEM,        0, NULL, OPT_LEGACY_MEM_NUM       },
 	{OPT_SINGLE_FILE_SEGMENTS, 0, NULL, OPT_SINGLE_FILE_SEGMENTS_NUM},
+	{OPT_LARGEPAGE_OBJECT,	1, NULL, OPT_LARGEPAGE_OBJECT_NUM },
 	{0,                     0, NULL, 0                        }
 };
 
@@ -208,6 +209,7 @@ eal_reset_internal_config(struct internal_config *internal_cfg)
 	internal_cfg->create_uio_dev = 0;
 	internal_cfg->iova_mode = RTE_IOVA_DC;
 	internal_cfg->user_mbuf_pool_ops_name = NULL;
+	internal_cfg->largepage_object = NULL;
 	internal_cfg->init_complete = 0;
 }
 

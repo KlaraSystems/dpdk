@@ -65,6 +65,8 @@ enum {
 	OPT_SINGLE_FILE_SEGMENTS_NUM,
 #define OPT_IOVA_MODE          "iova-mode"
 	OPT_IOVA_MODE_NUM,
+#define OPT_LARGEPAGE_OBJECT   "largepage-object"
+	OPT_LARGEPAGE_OBJECT_NUM,
 	OPT_LONG_MAX_NUM
 };
 

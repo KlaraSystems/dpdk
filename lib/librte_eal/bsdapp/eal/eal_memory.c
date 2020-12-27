@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: BSD-3-Clause
  * Copyright(c) 2010-2014 Intel Corporation
  */
-#include <sys/mman.h>
-#include <unistd.h>
 #include <sys/types.h>
+#include <sys/ioctl.h>
+#include <sys/memrange.h>
+#include <sys/mman.h>
 #include <sys/sysctl.h>
+#include <unistd.h>
 #include <inttypes.h>
 #include <errno.h>
 #include <string.h>
@@ -21,6 +23,12 @@
 
 #define EAL_PAGE_SIZE (sysconf(_SC_PAGESIZE))
 
+struct largepage {
+	phys_addr_t physaddr;
+	off_t offset;
+	int domain;
+};
+
 /*
  * Get physical address of any mapped virtual address in the current process.
  */
@@ -32,10 +40,62 @@ rte_mem_virt2phy(const void *virtaddr)
 	(void)virtaddr;
 	return RTE_BAD_IOVA;
 }
+
 rte_iova_t
 rte_mem_virt2iova(const void *virtaddr)
 {
 	return rte_mem_virt2phy(virtaddr);
+}
+
+static int
+largepagecmp(const void *_lp1, const void *_lp2)
+{
+	const struct largepage *lp1, *lp2;
+
+	lp1 = _lp1;
+	lp2 = _lp2;
+
+	if (lp1->physaddr < lp2->physaddr)
+		return -1;
+	else
+		return 1;
+}
+
+static int
+fill_largepage(struct largepage *lp, int fd, unsigned int index, uint64_t page_sz)
+{
+	struct mem_extract me;
+	void *addr;
+	int error, memfd;
+
+	addr = mmap(NULL, page_sz, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_NOCORE, fd, index * page_sz);
+	if (addr == MAP_FAILED) {
+		RTE_LOG(ERR, EAL, "Failed to map largepage object: %s\n", strerror(errno));
+		return -1;
+	}
+	memset(addr, 0, page_sz);
+
+	memfd = open("/dev/mem", O_RDONLY);
+	if (memfd < 0) {
+		RTE_LOG(ERR, EAL, "Failed to open /dev/mem: %s\n", strerror(errno));
+		(void)munmap(addr, page_sz);
+		return -1;
+	}
+
+	me.me_vaddr = (uintptr_t)addr;
+	error = ioctl(memfd, MEM_EXTRACT_PADDR, &me);
+	(void)munmap(addr, page_sz);
+	(void)close(memfd);
+
+	if (error != 0) {
+		RTE_LOG(ERR, EAL, "Failed to resolve vaddr: %s\n", strerror(errno));
+		return -1;
+	}
+
+	lp->physaddr = me.me_paddr;
+	lp->domain = me.me_domain;
+	lp->offset = index * page_sz;
+	return 0;
 }
 
 int
@@ -44,7 +104,7 @@ rte_eal_hugepage_init(void)
 	struct rte_mem_config *mcfg;
 	uint64_t total_mem = 0;
 	void *addr;
-	unsigned int i, j, seg_idx = 0;
+	unsigned int pgi, szi, seg_idx = 0;
 
 	/* get pointer to global configuration */
 	mcfg = rte_eal_get_configuration()->mem_config;
@@ -104,50 +164,56 @@ rte_eal_hugepage_init(void)
 	}
 
 	/* map all hugepages and sort them */
-	for (i = 0; i < internal_config.num_hugepage_sizes; i ++){
+	for (szi = 0; szi < internal_config.num_hugepage_sizes; szi++) {
 		struct hugepage_info *hpi;
-		rte_iova_t prev_end = 0;
+		struct largepage *pages;
+		uint64_t page_sz;
+		uint64_t mem_needed;
+		unsigned int max_pages, n_pages;
 		int prev_ms_idx = -1;
-		uint64_t page_sz, mem_needed;
-		unsigned int n_pages, max_pages;
 
-		hpi = &internal_config.hugepage_info[i];
+		hpi = &internal_config.hugepage_info[szi];
 		page_sz = hpi->hugepage_sz;
-		max_pages = hpi->num_pages[0];
-		mem_needed = RTE_ALIGN_CEIL(internal_config.memory - total_mem,
-				page_sz);
 
+		max_pages = hpi->num_pages[0];
+		if (max_pages == 0)
+			continue;
+		/* Recomputed below. */
+		hpi->num_pages[0] = 0;
+
+		mem_needed = RTE_ALIGN_CEIL(internal_config.memory - total_mem, page_sz);
 		n_pages = RTE_MIN(mem_needed / page_sz, max_pages);
 
-		for (j = 0; j < n_pages; j++) {
+		pages = calloc(n_pages, sizeof(*pages));
+		if (pages == NULL)
+			return -1;
+
+		for (pgi = 0; pgi < n_pages; pgi++) {
+			if (fill_largepage(&pages[pgi], hpi->lock_descriptor, pgi, page_sz) != 0) {
+				free(pages);
+				return -1;
+			}
+		}
+		qsort(pages, n_pages, sizeof(*pages), largepagecmp);
+
+		for (pgi = 0; pgi < n_pages; pgi++) {
 			struct rte_memseg_list *msl;
 			struct rte_fbarray *arr;
 			struct rte_memseg *seg;
-			int msl_idx, ms_idx;
-			rte_iova_t physaddr;
-			int error;
-			size_t sysctl_size = sizeof(physaddr);
-			char physaddr_str[64];
+			phys_addr_t physaddr;
+			int domain, msl_idx, ms_idx;
 			bool is_adjacent;
 
-			/* first, check if this segment is IOVA-adjacent to
-			 * the previous one.
-			 */
-			snprintf(physaddr_str, sizeof(physaddr_str),
-					"hw.contigmem.physaddr.%d", j);
-			error = sysctlbyname(physaddr_str, &physaddr,
-					&sysctl_size, NULL, 0);
-			if (error < 0) {
-				RTE_LOG(ERR, EAL, "Failed to get physical addr for buffer %u "
-						"from %s\n", j, hpi->hugedir);
-				return -1;
-			}
-
-			is_adjacent = prev_end != 0 && physaddr == prev_end;
-			prev_end = physaddr + hpi->hugepage_sz;
-
-			for (msl_idx = 0; msl_idx < RTE_MAX_MEMSEG_LISTS;
-					msl_idx++) {
+			domain = pages[pgi].domain;
+			physaddr = pages[pgi].physaddr;
+			if (pgi == 0)
+				is_adjacent = false;
+			else if (pages[pgi - 1].physaddr + page_sz != physaddr)
+				is_adjacent = false;
+			else
+				is_adjacent = true;
+ 
+			for (msl_idx = 0; msl_idx < RTE_MAX_MEMSEG_LISTS; msl_idx++) {
 				bool empty, need_hole;
 				msl = &mcfg->memsegs[msl_idx];
 				arr = &msl->memseg_arr;
@@ -193,12 +259,12 @@ rte_eal_hugepage_init(void)
 			 * MAP_FIXED here is safe.
 			 */
 			addr = mmap(addr, page_sz, PROT_READ|PROT_WRITE,
-					MAP_SHARED | MAP_FIXED,
+					MAP_SHARED | MAP_FIXED | MAP_NOCORE,
 					hpi->lock_descriptor,
-					j * EAL_PAGE_SIZE);
+					pgi * page_sz);
 			if (addr == MAP_FAILED) {
 				RTE_LOG(ERR, EAL, "Failed to mmap buffer %u from %s\n",
-						j, hpi->hugedir);
+						pgi, hpi->hugedir);
 				return -1;
 			}
 
@@ -208,7 +274,7 @@ rte_eal_hugepage_init(void)
 			seg->len = page_sz;
 			seg->nchannel = mcfg->nchannel;
 			seg->nrank = mcfg->nrank;
-			seg->socket_id = 0;
+			seg->socket_id = domain;
 
 			rte_fbarray_set_used(arr, ms_idx);
 
@@ -217,9 +283,11 @@ rte_eal_hugepage_init(void)
 					seg_idx++, addr, physaddr, page_sz);
 
 			total_mem += seg->len;
+
+			hpi->num_pages[domain]++;
 		}
-		if (total_mem >= internal_config.memory)
-			break;
+
+		free(pages);
 	}
 	if (total_mem < internal_config.memory) {
 		RTE_LOG(ERR, EAL, "Couldn't reserve requested memory, "
@@ -234,6 +302,7 @@ rte_eal_hugepage_init(void)
 struct attach_walk_args {
 	int fd_hugepage;
 	int seg_idx;
+	size_t page_sz;
 };
 static int
 attach_segment(const struct rte_memseg_list *msl, const struct rte_memseg *ms,
@@ -247,7 +316,7 @@ attach_segment(const struct rte_memseg_list *msl, const struct rte_memseg *ms,
 
 	addr = mmap(ms->addr, ms->len, PROT_READ | PROT_WRITE,
 			MAP_SHARED | MAP_FIXED, wa->fd_hugepage,
-			wa->seg_idx * EAL_PAGE_SIZE);
+			wa->seg_idx * wa->page_sz);
 	if (addr == MAP_FAILED || addr != ms->addr)
 		return -1;
 	wa->seg_idx++;
@@ -271,7 +340,7 @@ rte_eal_hugepage_attach(void)
 		memset(&wa, 0, sizeof(wa));
 
 		/* Obtain a file descriptor for contiguous memory */
-		fd_hugepage = open(cur_hpi->hugedir, O_RDWR);
+		fd_hugepage = shm_open(cur_hpi->hugedir, O_RDWR, 0);
 		if (fd_hugepage < 0) {
 			RTE_LOG(ERR, EAL, "Could not open %s\n",
 					cur_hpi->hugedir);
@@ -279,6 +348,7 @@ rte_eal_hugepage_attach(void)
 		}
 		wa.fd_hugepage = fd_hugepage;
 		wa.seg_idx = 0;
+		wa.page_sz = hpi->hugepage_sz;
 
 		/* Map the contiguous memory into each memory segment */
 		if (rte_memseg_walk(attach_segment, &wa) < 0) {
@@ -400,6 +470,8 @@ memseg_primary_init(void)
 	 *
 	 * so, at each stage, we will be checking how much memory we are
 	 * preallocating, and adjust all the values accordingly.
+	 *
+	 * XXX
 	 */
 
 	max_mem = (uint64_t)RTE_MAX_MEM_MB << 20;
@@ -418,6 +490,7 @@ memseg_primary_init(void)
 		hugepage_sz = hpi->hugepage_sz;
 
 		/* no NUMA support on FreeBSD */
+		/* XXX */
 
 		/* check if we've already exceeded total memory amount */
 		if (total_mem >= max_mem)

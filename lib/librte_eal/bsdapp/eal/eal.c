@@ -60,6 +60,8 @@ static rte_usage_hook_t	rte_application_usage_hook = NULL;
 /* early configuration structure, when memory config is not mmapped */
 static struct rte_mem_config early_mem_config;
 
+int eal_create_cpu_map(void);
+
 /* define fd variable here, because file needs to be kept open for the
  * duration of the program, as we hold a write lock on it in the primary proc */
 static int mem_cfg_fd = -1;
@@ -321,6 +323,9 @@ eal_usage(const char *prgname)
 {
 	printf("\nUsage: %s ", prgname);
 	eal_common_usage();
+	printf("EAL FreeBSD options:\n"
+	       "  --"OPT_LARGEPAGE_OBJECT"  Name of POSIX shared memory object for large pages\n"
+	       "\n");
 	/* Allow the application to print its usage message too if hook is set */
 	if ( rte_application_usage_hook ) {
 		printf("===== Application Usage =====\n\n");
@@ -450,6 +455,19 @@ eal_parse_args(int argc, char **argv)
 			internal_config.user_mbuf_pool_ops_name =
 			    strdup(optarg);
 			break;
+		case OPT_LARGEPAGE_OBJECT_NUM:
+		{
+			char *obj = strdup(optarg);
+			if (obj == NULL)
+				RTE_LOG(ERR, EAL, "Could not store large page object name\n");
+			else {
+				if (internal_config.largepage_object != NULL)
+					free(internal_config.largepage_object);
+
+				internal_config.largepage_object = obj;
+			}
+			break;
+		}
 		case 'h':
 			eal_usage(prgname);
 			exit(EXIT_SUCCESS);
@@ -602,6 +620,12 @@ rte_eal_init(int argc, char **argv)
 
 	/* set log level as early as possible */
 	eal_log_level_parse(argc, argv);
+
+	if (eal_create_cpu_map() < 0) {
+		rte_eal_init_alert("Cannot fetch NUMA locality info.");
+		/* rte_errno is set. */
+		return -1;
+	}
 
 	if (rte_eal_cpu_init() < 0) {
 		rte_eal_init_alert("Cannot detect lcores.");
